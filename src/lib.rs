@@ -344,7 +344,7 @@ impl VitsModel {
             }
         };
 
-        let audio = Vec::from(outputs.view().as_slice().unwrap());
+        let audio = Vec::from(outputs.1);
 
         Ok(Audio::new(
             audio.into(),
@@ -645,7 +645,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            z_t.view().clone().into_owned()
+            Array::from_shape_vec(z_t.0.as_slice(), z_t.1.to_vec()).unwrap().into_dyn()
         };
         let y_mask = {
             let y_mask_t = match values["y_mask"].try_extract_tensor::<f32>() {
@@ -657,7 +657,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            y_mask_t.view().clone().into_owned()
+            Array::from_shape_vec(y_mask_t.0.as_slice(), y_mask_t.1.to_vec()).unwrap().into_dyn()
         };
         let p_duration = if values.contains_key("p_duration") {
             let p_duration_t = match values["p_duration"].try_extract_tensor::<f32>() {
@@ -669,7 +669,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Some(p_duration_t.view().clone().into_owned())
+            Some(Array::from_shape_vec(p_duration_t.0.as_slice(), p_duration_t.1.to_vec()).unwrap().into_dyn())
         } else {
             None
         };
@@ -683,7 +683,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            g_t.view().clone().into_owned()
+            Array::from_shape_vec(g_t.0.as_slice(), g_t.1.to_vec()).unwrap().into_dyn()
         } else {
             Array1::<f32>::from_iter([]).into_dyn()
         };
@@ -697,12 +697,12 @@ impl EncoderOutputs {
     fn infer_decoder(&self, session: &Session) -> PiperResult<AudioSamples> {
         let outputs = {
             let mut inputs = vec![
-                SessionInputValue::from(Value::from_array(self.z.view()).unwrap()),
-                SessionInputValue::from(Value::from_array(self.y_mask.view()).unwrap()),
+                SessionInputValue::from(Value::from_array(self.z.clone()).unwrap()),
+                SessionInputValue::from(Value::from_array(self.y_mask.clone()).unwrap()),
             ];
             if !self.g.is_empty() {
                 inputs.push(SessionInputValue::from(
-                    Value::from_array(self.g.view()).unwrap(),
+                    Value::from_array(self.g.clone()).unwrap(),
                 ));
             }
             match session.run(SessionInputs::from(inputs.as_slice())) {
@@ -716,7 +716,7 @@ impl EncoderOutputs {
             }
         };
         match outputs[0].try_extract_tensor::<f32>() {
-            Ok(out) => Ok(Vec::from(out.view().as_slice().unwrap()).into()),
+            Ok(out) => Ok(Vec::from(out.1).into()),
             Err(e) => Err(PiperError::OperationError(format!(
                 "Failed to run model inference. Error: {}",
                 e
@@ -763,15 +763,15 @@ impl SpeechStreamer {
             let session = Arc::clone(&self.decoder_model);
             let z_view = self.encoder_outputs.z.view();
             let y_mask_view = self.encoder_outputs.y_mask.view();
-            let z_chunk = z_view.slice_axis(Axis(2), mel_index);
-            let y_mask_chunk = y_mask_view.slice_axis(Axis(2), mel_index);
+            let z_chunk = z_view.slice_axis(Axis(2), mel_index).to_owned();
+            let y_mask_chunk = y_mask_view.slice_axis(Axis(2), mel_index).to_owned();
             let mut inputs = vec![
                 SessionInputValue::from(Value::from_array(z_chunk).unwrap()),
                 SessionInputValue::from(Value::from_array(y_mask_chunk).unwrap()),
             ];
             if !self.encoder_outputs.g.is_empty() {
                 inputs.push(SessionInputValue::from(
-                    Value::from_array(self.encoder_outputs.g.view()).unwrap(),
+                    Value::from_array(self.encoder_outputs.g.clone()).unwrap(),
                 ));
             }
             let outputs = session
@@ -785,7 +785,7 @@ impl SpeechStreamer {
             let audio_t = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
                 PiperError::OperationError(format!("Failed to run model inference. Error: {}", e))
             })?;
-            self.process_chunk_audio(audio_t.view().view(), audio_index)?
+            self.process_chunk_audio(Array::from_shape_vec(audio_t.0.as_slice(), audio_t.1.to_vec()).unwrap().into_dyn().view(), audio_index)?
         };
         Ok(audio)
     }
