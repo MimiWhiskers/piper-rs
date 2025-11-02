@@ -344,7 +344,7 @@ impl VitsModel {
             }
         };
 
-        let audio = outputs.to_owned().into_raw_vec();
+        let audio = Vec::from(outputs.1);
 
         Ok(Audio::new(
             audio.into(),
@@ -645,7 +645,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            z_t.to_owned()
+            let shape: Vec<usize> = z_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), z_t.1.to_vec()).unwrap().into_dyn()
         };
         let y_mask = {
             let y_mask_t = match values["y_mask"].try_extract_tensor::<f32>() {
@@ -657,7 +658,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            y_mask_t.to_owned()
+            let shape: Vec<usize> = y_mask_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), y_mask_t.1.to_vec()).unwrap().into_dyn()
         };
         let p_duration = if values.contains_key("p_duration") {
             let p_duration_t = match values["p_duration"].try_extract_tensor::<f32>() {
@@ -669,7 +671,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Some(p_duration_t.to_owned())
+            let shape: Vec<usize> = p_duration_t.0.iter().map(|&d| d as usize).collect();
+            Some(Array::from_shape_vec(shape.as_slice(), p_duration_t.1.to_vec()).unwrap().into_dyn())
         } else {
             None
         };
@@ -683,7 +686,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            g_t.to_owned()
+            let shape: Vec<usize> = g_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), g_t.1.to_vec()).unwrap().into_dyn()
         } else {
             Array1::<f32>::from_iter([]).into_dyn()
         };
@@ -716,7 +720,7 @@ impl EncoderOutputs {
             }
         };
         match outputs[0].try_extract_tensor::<f32>() {
-            Ok(out) => Ok(out.to_owned().into_raw_vec().into()),
+            Ok(out) => Ok(Vec::from(out.1).into()),
             Err(e) => Err(PiperError::OperationError(format!(
                 "Failed to run model inference. Error: {}",
                 e
@@ -786,7 +790,12 @@ impl SpeechStreamer {
             let audio_t = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
                 PiperError::OperationError(format!("Failed to run model inference. Error: {}", e))
             })?;
-            self.process_chunk_audio(audio_t, audio_index)?
+            // Convert tuple (&Shape, &[f32]) to Array and then to ArrayView
+            let shape: Vec<usize> = audio_t.0.iter().map(|&d| d as usize).collect();
+            let audio_array = Array::from_shape_vec(shape.as_slice(), audio_t.1.to_vec())
+                .map_err(|e| PiperError::OperationError(format!("Failed to reshape audio tensor: {}", e)))?
+                .into_dyn();
+            self.process_chunk_audio(audio_array.view(), audio_index)?
         };
         Ok(audio)
     }
