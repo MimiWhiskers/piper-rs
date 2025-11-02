@@ -18,7 +18,7 @@ fn main() {
     // Set speaker ID
     if let Some(sid) = sid {
         let sid = sid.parse::<i64>().expect("Speaker ID should be number!");
-        model.set_speaker(sid);
+        model.lock().unwrap().set_speaker(sid);
     }
     let synth = PiperSpeechSynthesizer::new(model).unwrap();
     synth

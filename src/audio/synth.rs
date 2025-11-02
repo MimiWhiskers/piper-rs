@@ -128,10 +128,10 @@ impl AudioOutputConfig {
     }
 }
 
-pub struct PiperSpeechSynthesizer(Arc<dyn PiperModel + Sync + Send>);
+pub struct PiperSpeechSynthesizer(Arc<std::sync::Mutex<dyn PiperModel + Sync + Send>>);
 
 impl PiperSpeechSynthesizer {
-    pub fn new(model: Arc<dyn PiperModel + Sync + Send>) -> PiperResult<Self> {
+    pub fn new(model: Arc<std::sync::Mutex<dyn PiperModel + Sync + Send>>) -> PiperResult<Self> {
         Ok(Self(model))
     }
 
@@ -169,7 +169,7 @@ impl PiperSpeechSynthesizer {
         chunk_padding: usize,
     ) -> PiperResult<RealtimeSpeechStream> {
         let provider = self.create_synthesis_task_provider(text, output_config);
-        let wavinfo = self.0.audio_output_info()?;
+        let wavinfo = self.0.lock().unwrap().audio_output_info()?;
         RealtimeSpeechStream::new(
             provider,
             chunk_size,
@@ -200,79 +200,82 @@ impl PiperSpeechSynthesizer {
             ));
         }
         let audio = AudioSamples::from(samples);
+        let audio_info = self.0.lock().unwrap().audio_output_info()?;
         Ok(audio::write_wave_samples_to_file(
             filename,
             audio.to_i16_vec().iter(),
-            self.0.audio_output_info()?.sample_rate as u32,
-            self.0.audio_output_info()?.num_channels.try_into().unwrap(),
-            self.0.audio_output_info()?.sample_width.try_into().unwrap(),
+            audio_info.sample_rate as u32,
+            audio_info.num_channels.try_into().unwrap(),
+            audio_info.sample_width.try_into().unwrap(),
         )?)
     }
     #[inline(always)]
-    pub fn clone_model(&self) -> Arc<dyn PiperModel + Send + Sync> {
+    pub fn clone_model(&self) -> Arc<std::sync::Mutex<dyn PiperModel + Send + Sync>> {
         Arc::clone(&self.0)
     }
 }
 
 impl PiperModel for PiperSpeechSynthesizer {
     fn audio_output_info(&self) -> PiperResult<AudioInfo> {
-        self.0.audio_output_info()
+        self.0.lock().unwrap().audio_output_info()
     }
     fn phonemize_text(&self, text: &str) -> PiperResult<Phonemes> {
-        self.0.phonemize_text(text)
+        self.0.lock().unwrap().phonemize_text(text)
     }
-    fn speak_batch(&self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
-        self.0.speak_batch(phoneme_batches)
+    fn speak_batch(&mut self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
+        self.0.lock().unwrap().speak_batch(phoneme_batches)
     }
-    fn speak_one_sentence(&self, phonemes: String) -> PiperAudioResult {
-        self.0.speak_one_sentence(phonemes)
+    fn speak_one_sentence(&mut self, phonemes: String) -> PiperAudioResult {
+        self.0.lock().unwrap().speak_one_sentence(phonemes)
     }
     fn get_default_synthesis_config(&self) -> PiperResult<Box<dyn Any>> {
-        self.0.get_default_synthesis_config()
+        self.0.lock().unwrap().get_default_synthesis_config()
     }
     fn get_fallback_synthesis_config(&self) -> PiperResult<Box<dyn Any>> {
-        self.0.get_fallback_synthesis_config()
+        self.0.lock().unwrap().get_fallback_synthesis_config()
     }
     fn set_fallback_synthesis_config(&self, synthesis_config: &dyn Any) -> PiperResult<()> {
-        self.0.set_fallback_synthesis_config(synthesis_config)
+        self.0.lock().unwrap().set_fallback_synthesis_config(synthesis_config)
     }
     fn get_language(&self) -> PiperResult<Option<String>> {
-        self.0.get_language()
+        self.0.lock().unwrap().get_language()
     }
-    fn get_speakers(&self) -> PiperResult<Option<&HashMap<i64, String>>> {
-        self.0.get_speakers()
+    fn get_speakers(&self) -> PiperResult<Option<HashMap<i64, String>>> {
+        self.0.lock().unwrap().get_speakers()
     }
     fn set_speaker(&self, sid: i64) -> Option<PiperError> {
-        self.0.set_speaker(sid)
+        self.0.lock().unwrap().set_speaker(sid)
     }
     fn properties(&self) -> PiperResult<HashMap<String, String>> {
-        self.0.properties()
+        self.0.lock().unwrap().properties()
     }
     fn supports_streaming_output(&self) -> bool {
-        self.0.supports_streaming_output()
+        self.0.lock().unwrap().supports_streaming_output()
     }
-    fn stream_synthesis<'a>(
-        &'a self,
+    fn stream_synthesis(
+        &mut self,
         #[allow(unused_variables)] phonemes: String,
         #[allow(unused_variables)] chunk_size: usize,
         #[allow(unused_variables)] chunk_padding: usize,
-    ) -> PiperResult<Box<dyn Iterator<Item = PiperResult<AudioSamples>> + Send + Sync + 'a>> {
-        self.0.stream_synthesis(phonemes, chunk_size, chunk_padding)
+    ) -> PiperResult<AudioStreamIterator> {
+        let mut guard = self.0.lock().unwrap();
+        guard.stream_synthesis(phonemes, chunk_size, chunk_padding)
     }
 }
 
 struct SpeechSynthesisTaskProvider {
-    model: Arc<dyn PiperModel + Sync + Send>,
+    model: Arc<std::sync::Mutex<dyn PiperModel + Sync + Send>>,
     text: String,
     output_config: Option<AudioOutputConfig>,
 }
 
 impl SpeechSynthesisTaskProvider {
     fn get_phonemes(&self) -> PiperResult<Vec<String>> {
-        Ok(self.model.phonemize_text(&self.text)?.to_vec())
+        Ok(self.model.lock().unwrap().phonemize_text(&self.text)?.to_vec())
     }
     fn process_one_sentence(&self, phonemes: String) -> PiperAudioResult {
-        let wave_samples = self.model.speak_one_sentence(phonemes)?;
+        let mut model_guard = self.model.lock().unwrap();
+        let wave_samples = model_guard.speak_one_sentence(phonemes)?;
         match self.output_config {
             Some(ref config) => config.apply(wave_samples),
             None => Ok(wave_samples),
@@ -280,7 +283,8 @@ impl SpeechSynthesisTaskProvider {
     }
     #[allow(dead_code)]
     fn process_batches(&self, phonemes: Vec<String>) -> PiperResult<Vec<Audio>> {
-        let wave_samples = self.model.speak_batch(phonemes)?;
+        let mut model_guard = self.model.lock().unwrap();
+        let wave_samples = model_guard.speak_batch(phonemes)?;
         match self.output_config {
             Some(ref config) => {
                 let mut processed: Vec<Audio> = Vec::with_capacity(wave_samples.len());
@@ -369,10 +373,8 @@ impl RealtimeSpeechStream {
                 } else {
                     chunk_size
                 };
-                match provider
-                    .model
-                    .stream_synthesis(ph_sent, chunk_size, chunk_padding)
-                {
+                let mut model_guard = provider.model.lock().unwrap();
+                match model_guard.stream_synthesis(ph_sent, chunk_size, chunk_padding) {
                     Ok(stream) => {
                         let send_result = RealtimeSpeechStream::process_rt_stream(
                             stream,

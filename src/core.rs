@@ -7,8 +7,8 @@ pub use crate::audio::{Audio, AudioInfo, AudioSamples, WaveWriterError};
 
 pub type PiperResult<T> = Result<T, PiperError>;
 pub type PiperAudioResult = PiperResult<Audio>;
-pub type AudioStreamIterator<'a> =
-    Box<dyn Iterator<Item = PiperResult<AudioSamples>> + Send + Sync + 'a>;
+pub type AudioStreamIterator =
+    Box<dyn Iterator<Item = PiperResult<AudioSamples>> + Send + Sync + 'static>;
 
 #[derive(Debug)]
 pub enum PiperError {
@@ -86,19 +86,18 @@ pub trait PiperModel {
     fn get_language(&self) -> PiperResult<Option<String>> {
         Ok(None)
     }
-    fn get_speakers(&self) -> PiperResult<Option<&HashMap<i64, String>>> {
+    fn get_speakers(&self) -> PiperResult<Option<HashMap<i64, String>>> {
         Ok(None)
     }
     fn set_speaker(&self, sid: i64) -> Option<PiperError>;
     fn speaker_id_to_name(&self, sid: i64) -> PiperResult<Option<String>> {
         Ok(self
             .get_speakers()?
-            .and_then(|speakers| speakers.get(&sid))
-            .cloned())
+            .and_then(|speakers| speakers.get(&sid).cloned()))
     }
     fn speaker_name_to_id(&self, name: &str) -> PiperResult<Option<i64>> {
         Ok(self.get_speakers()?.and_then(|speakers| {
-            for (sid, sname) in speakers {
+            for (sid, sname) in speakers.iter() {
                 if sname == name {
                     return Some(*sid);
                 }
@@ -114,7 +113,7 @@ pub trait PiperModel {
         false
     }
     fn stream_synthesis(
-        &self,
+        &mut self,
         #[allow(unused_variables)] phonemes: String,
         #[allow(unused_variables)] chunk_size: usize,
         #[allow(unused_variables)] chunk_padding: usize,

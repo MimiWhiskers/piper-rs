@@ -13,6 +13,8 @@ fn main() {
 
     // Collect speakers into a Vec and sort them by name
     let mut speakers = model
+        .lock()
+        .unwrap()
         .get_speakers()
         .unwrap()
         .unwrap()

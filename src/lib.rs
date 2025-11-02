@@ -72,15 +72,15 @@ fn create_inference_session(model_path: &Path) -> Result<Session, ort::Error> {
         .commit_from_file(model_path)
 }
 
-pub fn from_config_path(config_path: &Path) -> PiperResult<Arc<dyn PiperModel + Send + Sync>> {
+pub fn from_config_path(config_path: &Path) -> PiperResult<Arc<std::sync::Mutex<dyn PiperModel + Send + Sync>>> {
     let (config, synth_config) = load_model_config(config_path)?;
     if config.streaming.unwrap_or_default() {
-        Ok(Arc::new(VitsStreamingModel::from_config(
+        Ok(Arc::new(std::sync::Mutex::new(VitsStreamingModel::from_config(
             config,
             synth_config,
             &config_path.with_file_name("encoder.onnx"),
             &config_path.with_file_name("decoder.onnx"),
-        )?))
+        )?)))
     } else {
         let Some(onnx_filename) = config_path.file_stem() else {
             return Err(PiperError::OperationError(format!(
@@ -88,11 +88,11 @@ pub fn from_config_path(config_path: &Path) -> PiperResult<Arc<dyn PiperModel + 
                 config_path.display()
             )));
         };
-        Ok(Arc::new(VitsModel::from_config(
+        Ok(Arc::new(std::sync::Mutex::new(VitsModel::from_config(
             config,
             synth_config,
             &config_path.with_file_name(onnx_filename),
-        )?))
+        )?)))
     }
 }
 
@@ -344,7 +344,7 @@ impl VitsModel {
             }
         };
 
-        let audio = Vec::from(outputs.1);
+        let audio = outputs.to_owned().into_raw_vec();
 
         Ok(Audio::new(
             audio.into(),
@@ -415,8 +415,8 @@ impl PiperModel for VitsModel {
     fn get_language(&self) -> PiperResult<Option<String>> {
         Ok(self.language())
     }
-    fn get_speakers(&self) -> PiperResult<Option<&HashMap<i64, String>>> {
-        Ok(Some(self.get_speaker_map()))
+    fn get_speakers(&self) -> PiperResult<Option<HashMap<i64, String>>> {
+        Ok(Some(self.get_speaker_map().clone()))
     }
     fn set_speaker(&self, sid: i64) -> Option<PiperError> {
         VitsModelCommons::set_speaker(self, sid)
@@ -587,8 +587,8 @@ impl PiperModel for VitsStreamingModel {
     fn get_language(&self) -> PiperResult<Option<String>> {
         Ok(self.language())
     }
-    fn get_speakers(&self) -> PiperResult<Option<&HashMap<i64, String>>> {
-        Ok(Some(self.get_speaker_map()))
+    fn get_speakers(&self) -> PiperResult<Option<HashMap<i64, String>>> {
+        Ok(Some(self.get_speaker_map().clone()))
     }
     fn set_speaker(&self, sid: i64) -> Option<PiperError> {
         VitsModelCommons::set_speaker(self, sid)
@@ -606,7 +606,7 @@ impl PiperModel for VitsStreamingModel {
         true
     }
     fn stream_synthesis(
-        &self,
+        &mut self,
         phonemes: String,
         chunk_size: usize,
         chunk_padding: usize,
@@ -645,8 +645,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            let shape: Vec<usize> = z_t.0.iter().map(|&d| d as usize).collect();
-            Array::from_shape_vec(shape.as_slice(), z_t.1.to_vec()).unwrap().into_dyn()
+            z_t.to_owned()
         };
         let y_mask = {
             let y_mask_t = match values["y_mask"].try_extract_tensor::<f32>() {
@@ -658,8 +657,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            let shape: Vec<usize> = y_mask_t.0.iter().map(|&d| d as usize).collect();
-            Array::from_shape_vec(shape.as_slice(), y_mask_t.1.to_vec()).unwrap().into_dyn()
+            y_mask_t.to_owned()
         };
         let p_duration = if values.contains_key("p_duration") {
             let p_duration_t = match values["p_duration"].try_extract_tensor::<f32>() {
@@ -671,8 +669,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            let shape: Vec<usize> = p_duration_t.0.iter().map(|&d| d as usize).collect();
-            Some(Array::from_shape_vec(shape.as_slice(), p_duration_t.1.to_vec()).unwrap().into_dyn())
+            Some(p_duration_t.to_owned())
         } else {
             None
         };
@@ -686,8 +683,7 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            let shape: Vec<usize> = g_t.0.iter().map(|&d| d as usize).collect();
-            Array::from_shape_vec(shape.as_slice(), g_t.1.to_vec()).unwrap().into_dyn()
+            g_t.to_owned()
         } else {
             Array1::<f32>::from_iter([]).into_dyn()
         };
@@ -720,7 +716,7 @@ impl EncoderOutputs {
             }
         };
         match outputs[0].try_extract_tensor::<f32>() {
-            Ok(out) => Ok(Vec::from(out.1).into()),
+            Ok(out) => Ok(out.to_owned().into_raw_vec().into()),
             Err(e) => Err(PiperError::OperationError(format!(
                 "Failed to run model inference. Error: {}",
                 e
@@ -778,9 +774,8 @@ impl SpeechStreamer {
                     Value::from_array(self.encoder_outputs.g.clone()).unwrap(),
                 ));
             }
-            let outputs = session
-                .lock()
-                .unwrap()
+            let mut session_guard = session.lock().unwrap();
+            let outputs = session_guard
                 .run(SessionInputs::from(inputs.as_slice()))
                 .map_err(|e| {
                     PiperError::OperationError(format!(
@@ -791,9 +786,7 @@ impl SpeechStreamer {
             let audio_t = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
                 PiperError::OperationError(format!("Failed to run model inference. Error: {}", e))
             })?;
-            let shape: Vec<usize> = audio_t.0.iter().map(|&d| d as usize).collect();
-            let audio_array = ArrayView::from_shape(shape.as_slice(), audio_t.1).unwrap().into_dyn();
-            self.process_chunk_audio(audio_array, audio_index)?
+            self.process_chunk_audio(audio_t, audio_index)?
         };
         Ok(audio)
     }
