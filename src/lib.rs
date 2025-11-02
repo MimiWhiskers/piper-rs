@@ -291,7 +291,7 @@ impl VitsModel {
             session,
         })
     }
-    fn infer_with_values(&self, input_phonemes: Vec<i64>) -> PiperAudioResult {
+    fn infer_with_values(&mut self, input_phonemes: Vec<i64>) -> PiperAudioResult {
         let synth_config = self.synth_config.read().unwrap();
 
         let input_len = input_phonemes.len();
@@ -309,7 +309,7 @@ impl VitsModel {
             None
         };
 
-        let session = &self.session;
+        let session = &mut self.session;
         let timer = std::time::Instant::now();
         let outputs = {
             let mut inputs = vec![
@@ -374,7 +374,7 @@ impl PiperModel for VitsModel {
         self.do_phonemize_text(text)
     }
 
-    fn speak_batch(&self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
+    fn speak_batch(&mut self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
         let (pad_id, bos_id, eos_id) = self.get_meta_ids();
         let phoneme_batches = Vec::from_iter(
             phoneme_batches
@@ -388,7 +388,7 @@ impl PiperModel for VitsModel {
         Ok(retval)
     }
 
-    fn speak_one_sentence(&self, phonemes: String) -> PiperAudioResult {
+    fn speak_one_sentence(&mut self, phonemes: String) -> PiperAudioResult {
         let (pad_id, bos_id, eos_id) = self.get_meta_ids();
         let phonemes = self.phonemes_to_input_ids(&phonemes, pad_id, bos_id, eos_id);
         self.infer_with_values(phonemes)
@@ -437,7 +437,7 @@ pub struct VitsStreamingModel {
     config: ModelConfig,
     speaker_map: HashMap<i64, String>,
     encoder_model: Session,
-    decoder_model: Arc<Session>,
+    decoder_model: Arc<std::sync::Mutex<Session>>,
 }
 
 impl VitsStreamingModel {
@@ -457,7 +457,7 @@ impl VitsStreamingModel {
             }
         };
         let decoder_model = match create_inference_session(decoder_path) {
-            Ok(model) => Arc::new(model),
+            Ok(model) => Arc::new(std::sync::Mutex::new(model)),
             Err(err) => {
                 return Err(PiperError::OperationError(format!(
                     "Failed to initialize onnxruntime inference session: `{}`",
@@ -476,10 +476,10 @@ impl VitsStreamingModel {
         })
     }
 
-    fn infer_with_values(&self, input_phonemes: Vec<i64>) -> PiperAudioResult {
+    fn infer_with_values(&mut self, input_phonemes: Vec<i64>) -> PiperAudioResult {
         let timer = std::time::Instant::now();
         let encoder_output = self.infer_encoder(input_phonemes)?;
-        let audio = encoder_output.infer_decoder(self.decoder_model.as_ref())?;
+        let audio = encoder_output.infer_decoder(&mut *self.decoder_model.lock().unwrap())?;
         let inference_ms = timer.elapsed().as_millis() as f32;
         Ok(Audio::new(
             audio,
@@ -487,7 +487,7 @@ impl VitsStreamingModel {
             Some(inference_ms),
         ))
     }
-    fn infer_encoder(&self, input_phonemes: Vec<i64>) -> PiperResult<EncoderOutputs> {
+    fn infer_encoder(&mut self, input_phonemes: Vec<i64>) -> PiperResult<EncoderOutputs> {
         let synth_config = self.synth_config.read().unwrap();
 
         let input_len = input_phonemes.len();
@@ -507,7 +507,7 @@ impl VitsStreamingModel {
             None
         };
 
-        let session = &self.encoder_model;
+        let session = &mut self.encoder_model;
         {
             let mut inputs = vec![
                 SessionInputValue::from(Value::from_array(phoneme_inputs).unwrap()),
@@ -547,7 +547,7 @@ impl PiperModel for VitsStreamingModel {
         self.do_phonemize_text(text)
     }
 
-    fn speak_batch(&self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
+    fn speak_batch(&mut self, phoneme_batches: Vec<String>) -> PiperResult<Vec<Audio>> {
         let (pad_id, bos_id, eos_id) = self.get_meta_ids();
         let phoneme_batches = Vec::from_iter(
             phoneme_batches
@@ -560,7 +560,7 @@ impl PiperModel for VitsStreamingModel {
         }
         Ok(retval)
     }
-    fn speak_one_sentence(&self, phonemes: String) -> PiperAudioResult {
+    fn speak_one_sentence(&mut self, phonemes: String) -> PiperAudioResult {
         let (pad_id, bos_id, eos_id) = self.get_meta_ids();
         let phonemes = self.phonemes_to_input_ids(&phonemes, pad_id, bos_id, eos_id);
         self.infer_with_values(phonemes)
@@ -645,7 +645,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Array::from_shape_vec(z_t.0.as_slice(), z_t.1.to_vec()).unwrap().into_dyn()
+            let shape: Vec<usize> = z_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), z_t.1.to_vec()).unwrap().into_dyn()
         };
         let y_mask = {
             let y_mask_t = match values["y_mask"].try_extract_tensor::<f32>() {
@@ -657,7 +658,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Array::from_shape_vec(y_mask_t.0.as_slice(), y_mask_t.1.to_vec()).unwrap().into_dyn()
+            let shape: Vec<usize> = y_mask_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), y_mask_t.1.to_vec()).unwrap().into_dyn()
         };
         let p_duration = if values.contains_key("p_duration") {
             let p_duration_t = match values["p_duration"].try_extract_tensor::<f32>() {
@@ -669,7 +671,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Some(Array::from_shape_vec(p_duration_t.0.as_slice(), p_duration_t.1.to_vec()).unwrap().into_dyn())
+            let shape: Vec<usize> = p_duration_t.0.iter().map(|&d| d as usize).collect();
+            Some(Array::from_shape_vec(shape.as_slice(), p_duration_t.1.to_vec()).unwrap().into_dyn())
         } else {
             None
         };
@@ -683,7 +686,8 @@ impl EncoderOutputs {
                     )))
                 }
             };
-            Array::from_shape_vec(g_t.0.as_slice(), g_t.1.to_vec()).unwrap().into_dyn()
+            let shape: Vec<usize> = g_t.0.iter().map(|&d| d as usize).collect();
+            Array::from_shape_vec(shape.as_slice(), g_t.1.to_vec()).unwrap().into_dyn()
         } else {
             Array1::<f32>::from_iter([]).into_dyn()
         };
@@ -694,7 +698,7 @@ impl EncoderOutputs {
             g,
         })
     }
-    fn infer_decoder(&self, session: &Session) -> PiperResult<AudioSamples> {
+    fn infer_decoder(&self, session: &mut Session) -> PiperResult<AudioSamples> {
         let outputs = {
             let mut inputs = vec![
                 SessionInputValue::from(Value::from_array(self.z.clone()).unwrap()),
@@ -726,7 +730,7 @@ impl EncoderOutputs {
 }
 
 struct SpeechStreamer {
-    decoder_model: Arc<Session>,
+    decoder_model: Arc<std::sync::Mutex<Session>>,
     encoder_outputs: EncoderOutputs,
     mel_chunker: AdaptiveMelChunker,
     one_shot: bool,
@@ -734,7 +738,7 @@ struct SpeechStreamer {
 
 impl SpeechStreamer {
     fn new(
-        decoder_model: Arc<Session>,
+        decoder_model: Arc<std::sync::Mutex<Session>>,
         encoder_outputs: EncoderOutputs,
         chunk_size: usize,
         chunk_padding: usize,
@@ -775,6 +779,8 @@ impl SpeechStreamer {
                 ));
             }
             let outputs = session
+                .lock()
+                .unwrap()
                 .run(SessionInputs::from(inputs.as_slice()))
                 .map_err(|e| {
                     PiperError::OperationError(format!(
@@ -785,7 +791,9 @@ impl SpeechStreamer {
             let audio_t = outputs[0].try_extract_tensor::<f32>().map_err(|e| {
                 PiperError::OperationError(format!("Failed to run model inference. Error: {}", e))
             })?;
-            self.process_chunk_audio(Array::from_shape_vec(audio_t.0.as_slice(), audio_t.1.to_vec()).unwrap().into_dyn().view(), audio_index)?
+            let shape: Vec<usize> = audio_t.0.iter().map(|&d| d as usize).collect();
+            let audio_array = ArrayView::from_shape(shape.as_slice(), audio_t.1).unwrap().into_dyn();
+            self.process_chunk_audio(audio_array, audio_index)?
         };
         Ok(audio)
     }
@@ -815,7 +823,7 @@ impl Iterator for SpeechStreamer {
             self.mel_chunker.consume();
             Some(
                 self.encoder_outputs
-                    .infer_decoder(self.decoder_model.as_ref()),
+                    .infer_decoder(&mut *self.decoder_model.lock().unwrap()),
             )
         } else {
             Some(self.synthesize_chunk(mel_index, audio_index))
